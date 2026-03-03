@@ -96,6 +96,16 @@
   .tb-btn.danger:hover:not(:disabled) { background: #FDF0EF; border-color: #DFA8A4; color: #B05A52; }
   .tb-btn.danger.active { background: #B05A52; border-color: #B05A52; color: #fff; }
 
+  /* zoom level pill */
+  #zoom-label {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #9E9894;
+    min-width: 38px;
+    text-align: center;
+    user-select: none;
+  }
+
   .tb-spacer { flex: 1; }
 
   /* ── Canvas ──────────────────────────────────────── */
@@ -110,6 +120,9 @@
     height: 100%;
     display: block;
   }
+
+  #canvas.panning { cursor: grabbing !important; }
+  #canvas.space-ready { cursor: grab !important; }
 
   /* ── Hint bar ────────────────────────────────────── */
   #hint {
@@ -208,6 +221,22 @@
     </button>
   </div>
 
+  <div class="tb-sep"></div>
+
+  <!-- Zoom controls -->
+  <div class="tb-group">
+    <button class="tb-btn" onclick="zoomStep(-1)" title="Alejar (-)">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="4" stroke="currentColor" stroke-width="1.4"/><path d="M3 5h4M8.5 8.5l2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    </button>
+    <span id="zoom-label">100%</span>
+    <button class="tb-btn" onclick="zoomStep(1)" title="Acercar (+)">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="4" stroke="currentColor" stroke-width="1.4"/><path d="M5 3v4M3 5h4M8.5 8.5l2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    </button>
+    <button class="tb-btn" onclick="resetView()" title="Restablecer vista">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><rect x="1.5" y="1.5" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.4"/><path d="M4.5 6.5h4M6.5 4.5v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
   <div class="tb-spacer"></div>
 
   <div class="tb-group">
@@ -226,7 +255,7 @@
 <div id="canvas-wrap">
   <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <!-- Dot grid -->
+      <!-- Dot grid (userSpace so it zooms with content) -->
       <pattern id="dots" x="0" y="0" width="28" height="28" patternUnits="userSpaceOnUse">
         <circle cx="14" cy="14" r="1" fill="#D8D5CF"/>
       </pattern>
@@ -243,19 +272,25 @@
       </marker>
     </defs>
 
-    <!-- Background -->
-    <rect id="bg" width="100%" height="100%" fill="url(#dots)"/>
+    <!-- Static canvas background -->
+    <rect width="100%" height="100%" fill="#F7F6F3"/>
 
-    <!-- Layers (order matters: arrows below nodes) -->
-    <g id="layer-arrows"></g>
-    <g id="layer-nodes"></g>
-    <g id="layer-badges"></g>
+    <!-- ── Viewport group (everything inside zooms/pans) ── -->
+    <g id="viewport">
+      <!-- Infinite grid background -->
+      <rect id="bg" x="-10000" y="-10000" width="20000" height="20000" fill="url(#dots)"/>
 
-    <!-- Temp arrow while drawing -->
-    <line id="tmp-line"
-      stroke="#A8A39D" stroke-width="1.5" stroke-dasharray="5 4"
-      marker-end="url(#mtmp)" display="none"
-      x1="0" y1="0" x2="0" y2="0"/>
+      <!-- Content layers -->
+      <g id="layer-arrows"></g>
+      <g id="layer-nodes"></g>
+      <g id="layer-badges"></g>
+
+      <!-- Temp arrow while drawing -->
+      <line id="tmp-line"
+        stroke="#A8A39D" stroke-width="1.5" stroke-dasharray="5 4"
+        marker-end="url(#mtmp)" display="none"
+        x1="0" y1="0" x2="0" y2="0"/>
+    </g>
   </svg>
 
   <div id="hint">Haz clic en el canvas para agregar una variable</div>
@@ -267,6 +302,7 @@
     <div class="leg-row"><div class="leg-dot" style="background:#B05A52"></div> Relación − (balancea)</div>
     <div class="leg-row" style="margin-top:4px;font-size:10.5px;color:#A8A39D;">Doble clic → editar texto</div>
     <div class="leg-row" style="font-size:10.5px;color:#A8A39D;">Arrastrar • en flecha → curvar</div>
+    <div class="leg-row" style="font-size:10.5px;color:#A8A39D;">Scroll → zoom · Espacio+arrastrar → mover</div>
     <div class="leg-row" style="font-size:10.5px;color:#A8A39D;">Ctrl+Z → deshacer</div>
   </div>
 </div>
@@ -282,7 +318,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 let mode     = 'node';      // 'node' | 'arrow' | 'delete'
 let relation = 'positive';  // 'positive' | 'negative'
-let arrowSrc = null;        // node id while drawing arrow
+let arrowSrc = null;
 
 let nodes  = [];  // { id, x, y, text }
 let arrows = [];  // { id, src, tgt, rel, cp:{x,y}|null }
@@ -290,29 +326,74 @@ let badges = [];  // { id, x, y, text }
 
 let seq = { node: 0, arrow: 0, badge: 0 };
 
+// ── Viewport (zoom + pan) ─────────────────────────────────────────────────────
+let vpTx    = 0;
+let vpTy    = 0;
+let vpScale = 1;
+
 // ── Undo ─────────────────────────────────────────────────────────────────────
-let history = [];            // snapshots for undo
-let preDragSnap = null;      // state captured at drag-start
-let dragMoved   = false;     // whether the drag actually moved
+let history     = [];
+let preDragSnap = null;
+let dragMoved   = false;
 
 // ── Drag state ───────────────────────────────────────────────────────────────
-// kind: 'node' | 'badge' | 'cp'
+// kind: 'node' | 'badge' | 'cp' | 'pan'
 let drag = null;
 
-// ── Edit state ───────────────────────────────────────────────────────────────
-let editing = null; // { kind:'node'|'badge', id }
+// ── Space-key pan ─────────────────────────────────────────────────────────────
+let spaceDown = false;
 
-// ── Layers ───────────────────────────────────────────────────────────────────
-const svg     = document.getElementById('canvas');
-const lArrows = document.getElementById('layer-arrows');
-const lNodes  = document.getElementById('layer-nodes');
-const lBadges = document.getElementById('layer-badges');
-const tmpLine = document.getElementById('tmp-line');
-const hint    = document.getElementById('hint');
-const editor  = document.getElementById('node-editor');
+// ── Edit state ───────────────────────────────────────────────────────────────
+let editing = null;
+
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const svg      = document.getElementById('canvas');
+const viewport = document.getElementById('viewport');
+const lArrows  = document.getElementById('layer-arrows');
+const lNodes   = document.getElementById('layer-nodes');
+const lBadges  = document.getElementById('layer-badges');
+const tmpLine  = document.getElementById('tmp-line');
+const hint     = document.getElementById('hint');
+const editor   = document.getElementById('node-editor');
 
 // ────────────────────────────────────────────────────────────────────────────
-// UNDO HELPERS
+// VIEWPORT TRANSFORM
+// ────────────────────────────────────────────────────────────────────────────
+function applyViewport() {
+  viewport.setAttribute('transform', `translate(${vpTx},${vpTy}) scale(${vpScale})`);
+  document.getElementById('zoom-label').textContent = Math.round(vpScale * 100) + '%';
+}
+
+// Convert a screen-space SVG mouse point → canvas (world) coordinates
+function svgPt(e) {
+  const r = svg.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left - vpTx) / vpScale,
+    y: (e.clientY - r.top  - vpTy) / vpScale,
+  };
+}
+
+// Zoom centered on a screen-space point (sx, sy relative to SVG top-left)
+function zoomAt(factor, sx, sy) {
+  const newScale = Math.min(5, Math.max(0.1, vpScale * factor));
+  vpTx = sx - (sx - vpTx) * (newScale / vpScale);
+  vpTy = sy - (sy - vpTy) * (newScale / vpScale);
+  vpScale = newScale;
+  applyViewport();
+}
+
+function zoomStep(dir) {
+  const r  = svg.getBoundingClientRect();
+  zoomAt(dir > 0 ? 1.2 : 1 / 1.2, r.width / 2, r.height / 2);
+}
+
+function resetView() {
+  vpTx = 0; vpTy = 0; vpScale = 1;
+  applyViewport();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// UNDO
 // ────────────────────────────────────────────────────────────────────────────
 function captureState() {
   return JSON.parse(JSON.stringify({ nodes, arrows, badges, seq }));
@@ -331,7 +412,6 @@ function undo() {
   arrows = prev.arrows;
   badges = prev.badges;
   seq    = prev.seq;
-  // Rebuild DOM from scratch
   lNodes.innerHTML  = '';
   lArrows.innerHTML = '';
   lBadges.innerHTML = '';
@@ -366,11 +446,6 @@ function edgePoint(from, to, node) {
   if (a < 1e-6) return { x: cx, y: cy };
   const t = 1 / Math.sqrt(a);
   return { x: cx + ddx * t, y: cy + ddy * t };
-}
-
-function svgPt(e) {
-  const r = svg.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -436,27 +511,18 @@ function drawArrow(arrow) {
   if (!g) {
     g = mk('g', { id: `a${arrow.id}` });
 
-    // Fat invisible hit area
     const hit = mk('path', { fill: 'none', stroke: 'transparent', 'stroke-width': '14' });
     hit.style.cursor = 'pointer';
     hit.addEventListener('click', e => clickArrow(e, arrow.id));
 
-    // Visible path
     const path = mk('path', { fill: 'none', 'stroke-width': '1.8' });
     path.classList.add('apath');
 
-    // Sign label
     const lbl = mk('text', { 'text-anchor': 'middle', 'dominant-baseline': 'middle', 'pointer-events': 'none' });
     lbl.style.cssText = 'font:700 14px/1 system-ui,sans-serif;';
     lbl.classList.add('albl');
 
-    // Curve-drag handle (midpoint dot) — hidden for self-loops
-    const handle = mk('circle', {
-      r: '5',
-      fill: '#FFFFFF',
-      'stroke-width': '1.5',
-      cursor: 'grab',
-    });
+    const handle = mk('circle', { r: '5', fill: '#FFFFFF', 'stroke-width': '1.5', cursor: 'grab' });
     handle.classList.add('cp-handle');
     handle.addEventListener('mousedown', e => startDragCP(e, arrow.id));
     handle.addEventListener('dblclick',  e => resetCP(e, arrow.id));
@@ -474,52 +540,43 @@ function drawArrow(arrow) {
   const lbl    = g.querySelector('.albl');
   const handle = g.querySelector('.cp-handle');
 
-  let d, lx, ly, mx, my;
+  let d, lx, ly;
 
   if (arrow.src === arrow.tgt) {
-    // Self-loop (fixed shape, no handle)
-    const ww   = nodeWidth(s.text);
-    const offX = ww / 2;
-    const r    = 38;
-    const p1x  = s.x + offX * 0.5, p1y = s.y - NODE_H / 2;
-    const p2x  = s.x + offX * 0.5, p2y = s.y + NODE_H / 2;
-    d  = `M ${p1x} ${p1y} C ${p1x + r*1.6} ${p1y - r} ${p2x + r*1.6} ${p2y + r} ${p2x} ${p2y}`;
+    const ww = nodeWidth(s.text), offX = ww / 2, r = 38;
+    const p1x = s.x + offX * 0.5, p1y = s.y - NODE_H / 2;
+    const p2x = s.x + offX * 0.5, p2y = s.y + NODE_H / 2;
+    d  = `M ${p1x} ${p1y} C ${p1x+r*1.6} ${p1y-r} ${p2x+r*1.6} ${p2y+r} ${p2x} ${p2y}`;
     lx = s.x + offX * 0.5 + r * 1.7;
     ly = s.y;
     handle.setAttribute('display', 'none');
   } else {
-    // Normal arc with optional custom control point
     const ep1 = edgePoint({ x: t.x, y: t.y }, { x: s.x, y: s.y }, s);
     const ep2 = edgePoint({ x: s.x, y: s.y }, { x: t.x, y: t.y }, t);
 
     let cpx, cpy;
     if (arrow.cp) {
-      // Use stored custom control point
       cpx = arrow.cp.x;
       cpy = arrow.cp.y;
     } else {
-      // Auto-calculate: slight perpendicular offset
-      const midx = (ep1.x + ep2.x) / 2;
-      const midy = (ep1.y + ep2.y) / 2;
-      const dx   = ep2.x - ep1.x, dy = ep2.y - ep1.y;
-      const k    = 0.15;
-      cpx = midx - dy * k;
-      cpy = midy + dx * k;
+      const midx = (ep1.x + ep2.x) / 2, midy = (ep1.y + ep2.y) / 2;
+      const dx = ep2.x - ep1.x, dy = ep2.y - ep1.y;
+      cpx = midx - dy * 0.15;
+      cpy = midy + dx * 0.15;
     }
 
     d  = `M ${ep1.x} ${ep1.y} Q ${cpx} ${cpy} ${ep2.x} ${ep2.y}`;
     lx = cpx;
     ly = cpy - 11;
 
-    // Visual midpoint of bezier at t=0.5: 0.25*P0 + 0.5*CP + 0.25*P1
-    mx = 0.25 * ep1.x + 0.5 * cpx + 0.25 * ep2.x;
-    my = 0.25 * ep1.y + 0.5 * cpy + 0.25 * ep2.y;
+    // Visual midpoint of bezier at t=0.5
+    const mx = 0.25 * ep1.x + 0.5 * cpx + 0.25 * ep2.x;
+    const my = 0.25 * ep1.y + 0.5 * cpy + 0.25 * ep2.y;
 
     handle.setAttribute('display', '');
     handle.setAttribute('cx', mx);
     handle.setAttribute('cy', my);
     handle.setAttribute('stroke', color);
-    // Show handle more prominently if there's a custom CP
     handle.setAttribute('fill', arrow.cp ? color : '#FFFFFF');
     handle.style.opacity = arrow.cp ? '0.9' : '0.6';
   }
@@ -533,12 +590,12 @@ function drawArrow(arrow) {
   lbl.textContent = sign;
 }
 
-// ── Badge (loop label) ────────────────────────────────────────────────────────
+// ── Badge ─────────────────────────────────────────────────────────────────────
 function drawBadge(badge) {
   let g = document.getElementById(`b${badge.id}`);
   if (!g) {
     g = mk('g', { id: `b${badge.id}` });
-    g.style.cursor     = 'move';
+    g.style.cursor = 'move';
     g.style.userSelect = 'none';
 
     const circ = mk('circle', { r: '24', fill: '#F7F6F3', stroke: '#D6D2CB', 'stroke-width': '1.5' });
@@ -566,11 +623,11 @@ function drawBadge(badge) {
 
   circ.setAttribute('cx', badge.x);
   circ.setAttribute('cy', badge.y);
-  sym.setAttribute('x', badge.x);
-  sym.setAttribute('y', badge.y - 7);
+  sym.setAttribute('x',  badge.x);
+  sym.setAttribute('y',  badge.y - 7);
   sym.textContent = '↻';
-  txt.setAttribute('x', badge.x);
-  txt.setAttribute('y', badge.y + 8);
+  txt.setAttribute('x',  badge.x);
+  txt.setAttribute('y',  badge.y + 8);
   txt.textContent = badge.text;
 }
 
@@ -589,7 +646,8 @@ function setMode(m) {
   document.getElementById('btn-node').classList.toggle('active',   m === 'node');
   document.getElementById('btn-arrow').classList.toggle('active',  m === 'arrow');
   document.getElementById('btn-delete').classList.toggle('active', m === 'delete');
-  svg.style.cursor = m === 'node' ? 'crosshair' : m === 'delete' ? 'no-drop' : 'default';
+  if (!spaceDown)
+    svg.style.cursor = m === 'node' ? 'crosshair' : m === 'delete' ? 'no-drop' : 'default';
   refreshHint();
   redraw();
 }
@@ -603,8 +661,11 @@ function setRelation(r) {
 function addLoopBadge() {
   snapshot();
   const r  = svg.getBoundingClientRect();
+  // Place in center of current view in canvas coords
+  const cx = (r.width  / 2 - vpTx) / vpScale;
+  const cy = (r.height / 2 - vpTy) / vpScale;
   const id = ++seq.badge;
-  const b  = { id, x: r.width / 2, y: r.height / 2, text: 'R1' };
+  const b  = { id, x: cx, y: cy, text: 'R1' };
   badges.push(b);
   drawBadge(b);
 }
@@ -619,10 +680,11 @@ function clearAll() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// CANVAS EVENTS
+// CANVAS MOUSE EVENTS
 // ────────────────────────────────────────────────────────────────────────────
 document.getElementById('bg').addEventListener('click', e => {
-  if (mode === 'node') {
+  if (drag) return; // ignore click after pan
+  if (mode === 'node' && !spaceDown) {
     snapshot();
     const pt   = svgPt(e);
     const id   = ++seq.node;
@@ -639,41 +701,46 @@ document.getElementById('bg').addEventListener('click', e => {
   }
 });
 
+// Middle mouse or space+drag → pan
+svg.addEventListener('mousedown', e => {
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    e.preventDefault();
+    drag = { kind: 'pan', startX: e.clientX - vpTx, startY: e.clientY - vpTy };
+    svg.classList.add('panning');
+  }
+});
+
 svg.addEventListener('mousemove', e => {
+  const r  = svg.getBoundingClientRect();
+  const sx = e.clientX - r.left;
+  const sy = e.clientY - r.top;
   const pt = svgPt(e);
 
-  // Drag node
+  if (drag?.kind === 'pan') {
+    vpTx = e.clientX - drag.startX;
+    vpTy = e.clientY - drag.startY;
+    applyViewport();
+    dragMoved = true;
+    return;
+  }
+
   if (drag?.kind === 'node') {
     const node = nodes.find(n => n.id === drag.id);
-    if (node) {
-      node.x    = pt.x - drag.ox;
-      node.y    = pt.y - drag.oy;
-      dragMoved = true;
-      redraw();
-    }
+    if (node) { node.x = pt.x - drag.ox; node.y = pt.y - drag.oy; dragMoved = true; redraw(); }
   }
 
-  // Drag badge
   if (drag?.kind === 'badge') {
     const b = badges.find(b => b.id === drag.id);
-    if (b) {
-      b.x       = pt.x - drag.ox;
-      b.y       = pt.y - drag.oy;
-      dragMoved = true;
-      drawBadge(b);
-    }
+    if (b) { b.x = pt.x - drag.ox; b.y = pt.y - drag.oy; dragMoved = true; drawBadge(b); }
   }
 
-  // Drag curve control point
   if (drag?.kind === 'cp') {
     const arrow = arrows.find(a => a.id === drag.arrowId);
-    const s     = arrow && nodes.find(n => n.id === arrow.src);
-    const t     = arrow && nodes.find(n => n.id === arrow.tgt);
+    const s = arrow && nodes.find(n => n.id === arrow.src);
+    const t = arrow && nodes.find(n => n.id === arrow.tgt);
     if (arrow && s && t) {
       const ep1 = edgePoint({ x: t.x, y: t.y }, { x: s.x, y: s.y }, s);
       const ep2 = edgePoint({ x: s.x, y: s.y }, { x: t.x, y: t.y }, t);
-      // User drags the visual midpoint (t=0.5). Back-calculate the control point:
-      // midpoint = 0.25*ep1 + 0.5*cp + 0.25*ep2  =>  cp = 2*M - 0.5*ep1 - 0.5*ep2
       arrow.cp  = {
         x: 2 * pt.x - 0.5 * ep1.x - 0.5 * ep2.x,
         y: 2 * pt.y - 0.5 * ep1.y - 0.5 * ep2.y,
@@ -695,22 +762,31 @@ svg.addEventListener('mousemove', e => {
   }
 });
 
-svg.addEventListener('mouseup', () => {
-  if (dragMoved && preDragSnap) {
+svg.addEventListener('mouseup', e => {
+  if (dragMoved && preDragSnap && drag?.kind !== 'pan') {
     history.push(preDragSnap);
     if (history.length > 60) history.shift();
     updateUndoBtn();
   }
+  svg.classList.remove('panning');
   drag        = null;
   dragMoved   = false;
   preDragSnap = null;
 });
 
+// Scroll to zoom
+svg.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r      = svg.getBoundingClientRect();
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  zoomAt(factor, e.clientX - r.left, e.clientY - r.top);
+}, { passive: false });
+
 // ────────────────────────────────────────────────────────────────────────────
 // NODE INTERACTIONS
 // ────────────────────────────────────────────────────────────────────────────
 function startDragNode(e, id) {
-  if (mode === 'arrow' || mode === 'delete') return;
+  if (mode === 'arrow' || mode === 'delete' || spaceDown) return;
   e.stopPropagation();
   const node  = nodes.find(n => n.id === id);
   const pt    = svgPt(e);
@@ -720,22 +796,18 @@ function startDragNode(e, id) {
 }
 
 function clickNode(e, id) {
+  if (dragMoved) return;
   e.stopPropagation();
   if (mode === 'delete') { removeNode(id); return; }
   if (mode === 'arrow') {
     if (arrowSrc === null) {
-      arrowSrc = id;
-      redraw();
-      refreshHint();
+      arrowSrc = id; redraw(); refreshHint();
     } else {
       snapshot();
-      const aid = ++seq.arrow;
-      arrows.push({ id: aid, src: arrowSrc, tgt: id, rel: relation, cp: null });
-      const prev = arrowSrc;
-      arrowSrc   = null;
+      arrows.push({ id: ++seq.arrow, src: arrowSrc, tgt: id, rel: relation, cp: null });
+      arrowSrc = null;
       tmpLine.setAttribute('display', 'none');
-      redraw();
-      refreshHint();
+      redraw(); refreshHint();
     }
   }
 }
@@ -751,10 +823,14 @@ function editNodeById(id) {
   editing = { kind: 'node', id };
   const w    = nodeWidth(node.text);
   const svgR = svg.getBoundingClientRect();
-  editor.style.left    = (svgR.left + node.x - w / 2) + 'px';
-  editor.style.top     = (svgR.top  + node.y - NODE_H / 2 - 1) + 'px';
-  editor.style.width   = w + 'px';
-  editor.style.height  = NODE_H + 'px';
+  // Convert canvas coords → screen coords
+  const sx = node.x * vpScale + vpTx;
+  const sy = node.y * vpScale + vpTy;
+  editor.style.left    = (svgR.left + sx - (w * vpScale) / 2) + 'px';
+  editor.style.top     = (svgR.top  + sy - (NODE_H * vpScale) / 2 - 1) + 'px';
+  editor.style.width   = (w * vpScale) + 'px';
+  editor.style.height  = (NODE_H * vpScale) + 'px';
+  editor.style.fontSize = Math.max(10, 13 * vpScale) + 'px';
   editor.value         = node.text;
   editor.style.display = 'block';
   editor.focus();
@@ -766,9 +842,7 @@ function clickArrow(e, id) {
   if (mode === 'delete') removeArrow(id);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// CURVE CONTROL POINT
-// ────────────────────────────────────────────────────────────────────────────
+// ── Curve CP ──────────────────────────────────────────────────────────────────
 function startDragCP(e, arrowId) {
   e.stopPropagation();
   preDragSnap = captureState();
@@ -783,11 +857,9 @@ function resetCP(e, arrowId) {
   if (arrow) { arrow.cp = null; drawArrow(arrow); }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// BADGE INTERACTIONS
-// ────────────────────────────────────────────────────────────────────────────
+// ── Badge ─────────────────────────────────────────────────────────────────────
 function startDragBadge(e, id) {
-  if (mode === 'delete') return;
+  if (mode === 'delete' || spaceDown) return;
   e.stopPropagation();
   const b     = badges.find(b => b.id === id);
   const pt    = svgPt(e);
@@ -807,10 +879,13 @@ function editBadge(e, id) {
   if (!b) return;
   editing = { kind: 'badge', id };
   const svgR = svg.getBoundingClientRect();
-  editor.style.left    = (svgR.left + b.x - 30) + 'px';
-  editor.style.top     = (svgR.top  + b.y - 14) + 'px';
+  const sx = b.x * vpScale + vpTx;
+  const sy = b.y * vpScale + vpTy;
+  editor.style.left    = (svgR.left + sx - 30) + 'px';
+  editor.style.top     = (svgR.top  + sy - 14) + 'px';
   editor.style.width   = '60px';
   editor.style.height  = '28px';
+  editor.style.fontSize = '13px';
   editor.value         = b.text;
   editor.style.display = 'block';
   editor.focus();
@@ -827,19 +902,11 @@ function commitEdit() {
 
   if (editing.kind === 'node') {
     const node = nodes.find(n => n.id === editing.id);
-    if (node && node.text !== val) {
-      snapshot();
-      node.text = val;
-      redraw();
-    }
+    if (node && node.text !== val) { snapshot(); node.text = val; redraw(); }
   }
   if (editing.kind === 'badge') {
     const b = badges.find(b => b.id === editing.id);
-    if (b && b.text !== val) {
-      snapshot();
-      b.text = val;
-      drawBadge(b);
-    }
+    if (b && b.text !== val) { snapshot(); b.text = val; drawBadge(b); }
   }
   editing = null;
 }
@@ -884,12 +951,27 @@ function refreshHint() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// KEYBOARD SHORTCUT
+// KEYBOARD
 // ────────────────────────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !editing) {
+    e.preventDefault();
+    spaceDown = true;
+    svg.classList.add('space-ready');
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !editing) {
     e.preventDefault();
     undo();
+  }
+});
+
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space') {
+    spaceDown = false;
+    svg.classList.remove('space-ready');
+    if (drag?.kind === 'pan') { drag = null; dragMoved = false; }
+    // Restore correct cursor for current mode
+    svg.style.cursor = mode === 'node' ? 'crosshair' : mode === 'delete' ? 'no-drop' : 'default';
   }
 });
 
